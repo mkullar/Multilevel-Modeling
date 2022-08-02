@@ -1,0 +1,165 @@
+---
+title: "Inertia through multilevel modeling"
+author: "Monica Kullar"
+date: "8/1/2021"
+output: html_document
+---
+
+#emotion inertia overview
+```{r}
+library(dplyr)
+#MLM model for inertia where emotion at time t is predicted by emotion at time t-1...2 models (1 for PE and 1 for NE)
+
+#use averageemos from variability curves script for all ps in long format with time and average scores of N=105 sample.
+newgroup <- groupinfo[,-2]
+  newgroup <- dplyr::rename(newgroup, moniker = ID_ESM) 
+
+ardata <- merge(newgroup, averageemos, by = "moniker", all.y=TRUE)
+sapply(ardata, class)
+facvar <- c("moniker", "Group") #these ought to be factors
+ardata[facvar] <- lapply(ardata[facvar], as.factor)
+levels(ardata$Group) 
+levels(ardata$Group) <- c("Bipolar", "Healthy", "Depressed", "Remitted")
+ardata$Group <- factor(ardata$Group, levels = c("Depressed", "Remitted", "Bipolar", "Healthy")) #reorder levels as preferred for plotting
+
+#make sure ordered on $time
+ardata <- ardata %>% arrange(moniker, time)
+
+#get lagged emotions for various models related to lags (if appropriate)
+ardata$lagPositiveEmotion <- lag(ardata$PositiveEmotion)
+ardata[ardata$time == "1.1", "lagPositiveEmotion"] <- NA
+
+ardata$lagNegativeEmotion <- lag(ardata$NegativeEmotion)
+ardata[ardata$time == "1", "lagNegativeEmotion"] <- NA
+
+#for data-driven groups
+newsubgroup <- dplyr::rename(subgroups, moniker = ID_ESM) 
+ardata <- merge(ardata, newsubgroup[,-2], by = "moniker", all.y = TRUE)
+ardata$sub_membership <- as.factor(ardata$sub_membership)
+ardata <- dplyr::rename(ardata, Subgroup = sub_membership) 
+```
+
+
+#data preparation, MLM models with lagEmotion prepared at levels.
+```{r}
+library(nlme)
+library(lme4)
+library(lmerTest)
+library(tidyr)
+library(plyr)
+library(ggplot2)
+library(psych)
+library(DataCombine)
+library(reshape2)
+library(interactions)
+library(effects)
+library(emmeans)
+
+#STRUCTURING THE DATASET FORMAT FOR MLM WITH WITHIN/BETWEEN PERSONS INFO AND CENTERED (UNSCALED) VARIABLES
+    ##################### 
+daily1 <- ardata #ordered data by person and time
+sapply(daily1, class)
+daily1$moniker <- as.factor(daily1$moniker)
+## remove bipolar group due to sample size.
+#library(dplyr)
+daily1 = filter(daily1, Subgroup != "3")
+
+    daily.imeans <- ddply(daily1, "moniker", summarize, 
+                                lagPositiveEmotion.trait=mean(lagPositiveEmotion, na.rm=TRUE),
+                                lagNegativeEmotion.trait=mean(lagNegativeEmotion, na.rm=TRUE)) #outcome variable is just for plotting purposes
+    #describe(daily.imeans)
+    #Calculating sample-centered versions *Note that this is done in a person-level data file.
+    daily.imeans$lagPositiveEmotion.trait.c <- scale(daily.imeans$lagPositiveEmotion.trait,center=TRUE,scale=FALSE)
+    daily.imeans$lagNegativeEmotion.trait.c <- scale(daily.imeans$lagNegativeEmotion.trait,center=TRUE,scale=FALSE)
+    #describe(daily.imeans)
+    #merging "trait" scores back into the *long* data file and calculate "state" scores.
+    daily1 <- merge(daily1,daily.imeans,by="moniker")
+    daily1$lagPositiveEmotion.state <- daily1$lagPositiveEmotion - daily1$lagPositiveEmotion.trait
+    daily1$lagNegativeEmotion.state <- daily1$lagNegativeEmotion - daily1$lagNegativeEmotion.trait
+    # person mean-centered 'state' score (person score minus person mean == person-mean centered == group-mean centered)
+    describe(daily1)
+    
+#Other reference studies looking at inertia tend to only look at person-specific intercepts/slopes, that is within-person predictor variables entered at level 1 were peson-mean centered (.state). The group status is a level 2 (between person) predictor.
+
+# CLINICAL GROUPS 
+ model2A_fit <- lmer(formula = PositiveEmotion ~ 
+                       lagPositiveEmotion.state*Group + #only level 1 state predictor, with level 2 group moderator
+                      (1|moniker), 
+                    data=daily1,
+                    na.action=na.exclude,
+                    REML = TRUE)
+    summary(model2A_fit)
+    
+ model2B_fit <- lmer(formula = NegativeEmotion ~ 
+                       lagNegativeEmotion.state*Group +
+                      (1|moniker), 
+                    data=daily1,
+                    na.action=na.exclude,
+                    REML = TRUE)
+    summary(model2B_fit)    
+    
+ #PLOTTING INTERACTIONS
+hqInertia <-   emmip(model2A_fit, Group ~ lagPositiveEmotion.state, cov.reduce = range, CIs = TRUE, PIs = FALSE, engine = "ggplot") + theme_classic() + 
+      xlab("Positive Emotion at time (t-1)") + 
+      ylab("Linear prediction of Positive Emotion") +
+  ggtitle("Positive Emotion Inertia") +
+      aes(linetype = Group)
+hqInertia
+    image=hqInertia
+ggsave(file="PosInertiaDiag2.svg", plot=hqInertia, path = "~/output/VectorFigures/", height = 3, width = 5)
+    
+hqInertia2  <-     emmip(model2B_fit, Group ~ lagNegativeEmotion.state, cov.reduce = range, CIs = TRUE, PIs = FALSE, engine = "ggplot") + theme_classic() + 
+      xlab("Negative Emotion at time (t-1)") + 
+      ylab("Linear prediction of Negative Emotion") +
+  ggtitle("Negative Emotion Inertia") +
+      aes(linetype = Group)
+hqInertia2 
+    image=hqInertia2 
+ggsave(file="NegInertiaDiag2.svg", plot=hqInertia2 , path = "~/output/VectorFigures/", height = 3, width = 5)
+
+emtrends(model2A_fit, pairwise ~ Group, var = "lagPositiveEmotion.state", lmer.df = "satterthwaite", adjust = "mvt") #don't forget, switch the sign of the beta and Z/T because of the way these values are interpreted for the comparison levels.
+emtrends(model2B_fit, pairwise ~ Group, var = "lagNegativeEmotion.state", lmer.df = "satterthwaite", adjust = "mvt")
+    
+    
+#GIMME SUBGROUPS
+     model2A_fit <- lmer(formula = PositiveEmotion ~
+                       lagPositiveEmotion.state*Subgroup +
+                      (1|moniker), 
+                    data=daily1,
+                    na.action=na.exclude,
+                    REML = TRUE)
+    summary(model2A_fit)
+    
+ model2B_fit <- lmer(formula = NegativeEmotion ~ 
+                       lagNegativeEmotion.state*Subgroup +
+                      (1|moniker), 
+                    data=daily1,
+                    na.action=na.exclude,
+                    REML = TRUE)
+    summary(model2B_fit)    
+    
+ #PLOTTING INTERACTIONS
+hqInertia <-   emmip(model2A_fit, Subgroup ~ lagPositiveEmotion.state, cov.reduce = range, CIs = TRUE, PIs = FALSE, engine = "ggplot") + theme_classic() + 
+      xlab("Positive Emotion at time (t-1)") + 
+      ylab("Linear prediction of Positive Emotion") +
+  ggtitle("Positive Emotion Inertia") +
+      aes(linetype = Subgroup)
+hqInertia
+    image=hqInertia
+ggsave(file="PosInertiaDD2.svg", plot=hqInertia, path = "~/output/VectorFigures/", height = 3, width = 5)
+    
+hqInertia2  <-     emmip(model2B_fit, Subgroup ~ lagNegativeEmotion.state, cov.reduce = range, CIs = TRUE, PIs = FALSE, engine = "ggplot") + theme_classic() + 
+      xlab("Negative Emotion at time (t-1)") + 
+      ylab("Linear prediction of Negative Emotion") +
+  ggtitle("Negative Emotion Inertia") +
+      aes(linetype = Subgroup)
+hqInertia2 
+    image=hqInertia2 
+ggsave(file="NegInertiaDD2.svg", plot=hqInertia2 , path = "~/output/VectorFigures/", height = 3, width = 5)
+
+  # EFFECT SIZES OF MODELS
+library(r2mlm)
+#r2mlm reads in a multilevel model (MLM) object generated using lmer or nlme, and outputs all relevant R-squared measures from the Rights and Sterba (2019) framework of multilevel model R-squared measures, which can be visualized together as a set using the outputted bar chart decompositions of outcome variance. That is, when predictors are cluster-mean-centered, all R-squared measures from Rights & Sterba (2019) Table 1 and decompositions from Rights & Sterba (2019) Figure 1 are outputted. When predictors are not cluster-mean-centered, the total R-squared measures from Rights & Sterba (2019) Table 5, as well as bar chart decompositions are outputted. Any number of level-1 and/or level-2 predictors is supported. Any of the level-1 predictors can have random slopes.
+r2mlm(model2A_fit, bargraph = TRUE)
+    
+```    
